@@ -143,16 +143,19 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_ready():
-    guild = bot.get_guild(GUILD_ID)
-    if guild:
-        await bot.tree.sync(guild=guild)
-        print(f"Commands synced to {guild.name}")
-    else:
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if guild:
+            await bot.tree.sync(guild=guild)
+            print(f"Guild commands synced → {guild.name}")
         await bot.tree.sync()
-        print("Commands synced globally")
+        print("Global commands synced.")
+    except Exception as e:
+        print("Command sync error:", e)
 
     print(f"Logged in as {bot.user}")
     monthly_report_task.start()
+
 
 
 # ----------------- COMMAND: /present -----------------
