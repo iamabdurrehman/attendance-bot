@@ -20,7 +20,7 @@ LEADERSHIP_CHANNEL_ID = 1391757084109836358
 ATTENDANCE_CHANNEL_ID = 1440240074196521041
 
 OFFICE_START_TIME = time(10, 20)          # 10:20 AM
-EXCLUDED_ROLES = ["CEO", "CTO", "CFO", "COO"]
+EXCLUDED_ROLES = ["CEO", "CTO", "CFO", "COO"]  # fully excluded from system
 DB_FILE = "attendance.db"
 
 # Your local timezone (Pakistan)
@@ -55,6 +55,7 @@ init_db()
 
 
 def mark_attendance_db(user_id: int, username: str, date_str: str, time_str: str, is_late: bool):
+    """Insert one attendance record."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
@@ -81,6 +82,7 @@ def get_month_date_range(year: int, month: int):
 
 
 def query_monthly_lates(year: int, month: int):
+    """Return (user_id, username, late_count) for people who were late in that month."""
     start_date, end_date = get_month_date_range(year, month)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -99,8 +101,17 @@ def query_monthly_lates(year: int, month: int):
 # ----------------- HELPERS -----------------
 
 
-def user_is_exempt(member: discord.Member) -> bool:
+def is_excluded_user(member: discord.Member) -> bool:
+    """True if member has any excluded role (CEO/CTO/CFO/COO)."""
     return any(role.name in EXCLUDED_ROLES for role in member.roles)
+
+
+def is_excluded_user_id(guild: discord.Guild, user_id: int) -> bool:
+    """Same as above but using a user_id from DB."""
+    member = guild.get_member(user_id)
+    if member is None:
+        return False
+    return is_excluded_user(member)
 
 
 def calculate_fine(late_count: int) -> int:
@@ -116,10 +127,15 @@ async def on_message(message: discord.Message):
     if message.author.bot or message.channel.id != ATTENDANCE_CHANNEL_ID:
         return
 
+    user = message.author
+
+    # Completely ignore CEO/CTO/CFO/COO
+    if is_excluded_user(user):
+        return
+
     now = datetime.now(TIMEZONE)
     today_str = now.date().isoformat()
     time_str = now.strftime("%H:%M:%S")
-    user = message.author
 
     # already marked via /present or earlier message?
     if has_attendance_today(user.id, today_str):
@@ -143,19 +159,16 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_ready():
-    try:
-        guild = bot.get_guild(GUILD_ID)
-        if guild:
-            await bot.tree.sync(guild=guild)
-            print(f"Guild commands synced → {guild.name}")
+    guild = bot.get_guild(GUILD_ID)
+    if guild:
+        await bot.tree.sync(guild=guild)
+        print(f"Commands synced to {guild.name}")
+    else:
         await bot.tree.sync()
-        print("Global commands synced.")
-    except Exception as e:
-        print("Command sync error:", e)
+        print("Commands synced globally")
 
     print(f"Logged in as {bot.user}")
     monthly_report_task.start()
-
 
 
 # ----------------- COMMAND: /present -----------------
@@ -167,10 +180,18 @@ async def present(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Use this command in the attendance channel.", ephemeral=True)
         return
 
+    user = interaction.user
+
+    # Excluded users never participate
+    if is_excluded_user(user):
+        await interaction.response.send_message(
+            "⚠️ You are exempt from attendance tracking.", ephemeral=True
+        )
+        return
+
     now = datetime.now(TIMEZONE)
     today_str = now.date().isoformat()
     time_str = now.strftime("%H:%M:%S")
-    user = interaction.user
 
     if has_attendance_today(user.id, today_str):
         await interaction.response.send_message("✅ Already marked attendance today.", ephemeral=True)
@@ -197,6 +218,13 @@ async def present(interaction: discord.Interaction):
 @app_commands.describe(year="Year", month="Month from 1 to 12")
 async def my_late_count(interaction: discord.Interaction, year: int, month: int):
     user = interaction.user
+
+    if is_excluded_user(user):
+        await interaction.response.send_message(
+            "⚠️ You are exempt from attendance tracking.", ephemeral=True
+        )
+        return
+
     start, end = get_month_date_range(year, month)
 
     conn = sqlite3.connect(DB_FILE)
@@ -228,7 +256,7 @@ async def monthly_report(interaction: discord.Interaction, year: int, month: int
     await interaction.followup.send("📨 Monthly fine report generated.", ephemeral=True)
 
 
-# ----------------- NEW: /attendance_report (raw attendance CSV) -----------------
+# ----------------- /attendance_report (raw attendance CSV) -----------------
 
 
 @bot.tree.command(
@@ -241,12 +269,13 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
         await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
         return
 
+    guild = interaction.guild
     start_date, end_date = get_month_date_range(year, month)
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
-        SELECT username, date, time, is_late
+        SELECT user_id, username, date, time, is_late
         FROM attendance
         WHERE date BETWEEN ? AND ?
         ORDER BY date, time;
@@ -254,7 +283,14 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
     rows = c.fetchall()
     conn.close()
 
-    if not rows:
+    # Filter out excluded roles by user_id
+    filtered_rows = []
+    for user_id, username, d, t, is_late in rows:
+        if is_excluded_user_id(guild, user_id):
+            continue
+        filtered_rows.append((username, d, t, is_late))
+
+    if not filtered_rows:
         await interaction.response.send_message(
             f"📂 No attendance records for {year}-{month:02d}.", ephemeral=True
         )
@@ -264,7 +300,7 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Username", "Date", "Time", "Status"])
-        for username, d, t, is_late in rows:
+        for username, d, t, is_late in filtered_rows:
             status = "Late" if is_late == 1 else "On Time"
             writer.writerow([username, d, t, status])
 
@@ -278,7 +314,7 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
         os.remove(filename)
 
 
-# ----------------- NEW: /attendance_today (present vs absent) -----------------
+# ----------------- /attendance_today (present vs absent) -----------------
 
 
 @bot.tree.command(
@@ -294,10 +330,13 @@ async def attendance_today(interaction: discord.Interaction):
     today = datetime.now(TIMEZONE).date()
     today_str = today.isoformat()
 
-    # All human members (ignore bots)
-    eligible_members = [m for m in guild.members if not m.bot]
+    # All human members EXCEPT excluded roles
+    eligible_members = [
+        m for m in guild.members
+        if (not m.bot) and (not is_excluded_user(m))
+    ]
 
-    # Get all user_ids who have attendance today
+    # Get present IDs for today
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT DISTINCT user_id FROM attendance WHERE date = ?;", (today_str,))
@@ -325,7 +364,7 @@ async def attendance_today(interaction: discord.Interaction):
     await interaction.response.send_message("\n".join(text), ephemeral=False)
 
 
-# ----------------- NEW: /employee_summary (per-employee stats + fine) -----------------
+# ----------------- /employee_summary (per-employee stats + fine) -----------------
 
 
 @bot.tree.command(
@@ -338,6 +377,7 @@ async def employee_summary(interaction: discord.Interaction, year: int, month: i
         await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
         return
 
+    guild = interaction.guild
     start_date, end_date = get_month_date_range(year, month)
 
     conn = sqlite3.connect(DB_FILE)
@@ -354,7 +394,14 @@ async def employee_summary(interaction: discord.Interaction, year: int, month: i
     rows = c.fetchall()
     conn.close()
 
-    if not rows:
+    # Filter out excluded roles
+    filtered_rows = []
+    for user_id, username, total_days, late_days in rows:
+        if is_excluded_user_id(guild, user_id):
+            continue
+        filtered_rows.append((username, total_days, late_days))
+
+    if not filtered_rows:
         await interaction.response.send_message(
             f"📊 No attendance data for {year}-{month:02d}.", ephemeral=True
         )
@@ -364,7 +411,7 @@ async def employee_summary(interaction: discord.Interaction, year: int, month: i
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Username", "On Time", "Late", "Total Days", "Fine (Rs)"])
-        for _, username, total_days, late_days in rows:
+        for username, total_days, late_days in filtered_rows:
             late_days = late_days or 0
             on_time = total_days - late_days
             fine = calculate_fine(late_days)
@@ -407,10 +454,18 @@ async def monthly_report_task():
 # ----------------- FINE REPORT GENERATOR -----------------
 
 
-async def generate_and_send_monthly_report(guild, channel, year: int, month: int, auto=False):
+async def generate_and_send_monthly_report(guild: discord.Guild, channel: discord.TextChannel,
+                                           year: int, month: int, auto: bool = False):
     report_rows, start_date, end_date = query_monthly_lates(year, month)
 
-    if not report_rows:
+    # Filter out excluded roles
+    filtered_rows = []
+    for user_id, username, late_count in report_rows:
+        if is_excluded_user_id(guild, user_id):
+            continue
+        filtered_rows.append((username, late_count))
+
+    if not filtered_rows:
         await channel.send(f"📊 No late records for {year}-{month:02d}.")
         return
 
@@ -418,7 +473,7 @@ async def generate_and_send_monthly_report(guild, channel, year: int, month: int
     with open(filename, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(["Username", "Late Count", "Fine (Rs)"])
-        for _, username, late_count in report_rows:
+        for username, late_count in filtered_rows:
             fine = calculate_fine(late_count)
             writer.writerow([username, late_count, fine])
 
