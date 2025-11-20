@@ -19,8 +19,14 @@ GUILD_ID = 1036605140083413086
 LEADERSHIP_CHANNEL_ID = 1391757084109836358
 ATTENDANCE_CHANNEL_ID = 1440240074196521041
 
-OFFICE_START_TIME = time(10, 20)          # 10:20 AM
-EXCLUDED_ROLES = ["CEO", "CTO", "CFO", "COO"]  # fully excluded from system
+OFFICE_START_TIME = time(10, 30)          # 10:20 AM
+
+# Roles COMPLETELY EXCLUDED from attendance (no commands, no DB records, no reports)
+EXCLUDED_ROLES = ["NoAttendance"]   # create this role in Discord
+
+# Roles that are attendance admins (can run reports/summary commands)
+ADMIN_ROLES = ["CEO", "CTO", "CFO", "COO"]
+
 DB_FILE = "attendance.db"
 
 # Your local timezone (Pakistan)
@@ -102,7 +108,7 @@ def query_monthly_lates(year: int, month: int):
 
 
 def is_excluded_user(member: discord.Member) -> bool:
-    """True if member has any excluded role (CEO/CTO/CFO/COO)."""
+    """True if member has any excluded role (NoAttendance etc.)."""
     return any(role.name in EXCLUDED_ROLES for role in member.roles)
 
 
@@ -112,6 +118,11 @@ def is_excluded_user_id(guild: discord.Guild, user_id: int) -> bool:
     if member is None:
         return False
     return is_excluded_user(member)
+
+
+def is_admin(member: discord.Member) -> bool:
+    """True if member has any of the admin roles (CEO/CTO/CFO/COO)."""
+    return any(role.name in ADMIN_ROLES for role in member.roles)
 
 
 def calculate_fine(late_count: int) -> int:
@@ -129,7 +140,7 @@ async def on_message(message: discord.Message):
 
     user = message.author
 
-    # Completely ignore CEO/CTO/CFO/COO
+    # Completely ignore users with EXCLUDED_ROLES (NoAttendance etc.)
     if is_excluded_user(user):
         return
 
@@ -145,10 +156,14 @@ async def on_message(message: discord.Message):
     is_late = now.time() > OFFICE_START_TIME
     mark_attendance_db(user.id, f"{user.name}#{user.discriminator}", today_str, time_str, is_late)
 
+    # Public channel message for both late and on-time check-ins
     if is_late:
         await message.channel.send(
-            f"🔔 {user.mention} you are **late today** because you arrived after 10:20 and "
-            f"did not mark attendance."
+            f"⏰ {user.mention} is **late today** (checked in at `{time_str}`)."
+        )
+    else:
+        await message.channel.send(
+            f"✅ {user.mention} is **on time today** (checked in at `{time_str}`)."
         )
 
     await bot.process_commands(message)
@@ -182,10 +197,10 @@ async def present(interaction: discord.Interaction):
 
     user = interaction.user
 
-    # Excluded users never participate
+    # Excluded users never participate (NoAttendance role)
     if is_excluded_user(user):
         await interaction.response.send_message(
-            "⚠️ You are exempt from attendance tracking.", ephemeral=True
+            "❌ You are excluded from the attendance system.", ephemeral=True
         )
         return
 
@@ -200,15 +215,23 @@ async def present(interaction: discord.Interaction):
     is_late = now.time() > OFFICE_START_TIME
     mark_attendance_db(user.id, f"{user.name}#{user.discriminator}", today_str, time_str, is_late)
 
+    # Private confirmation to the user
     await interaction.response.send_message(
         "⏰ You are marked **LATE** for today." if is_late else "✅ Attendance marked on time.",
         ephemeral=True
     )
 
-    if is_late:
-        channel = interaction.guild.get_channel(ATTENDANCE_CHANNEL_ID)
-        if channel:
-            await channel.send(f"⏰ {user.mention} is **late today** (checked in at `{time_str}`).")
+    # Public message in attendance channel for both late & on-time
+    channel = interaction.guild.get_channel(ATTENDANCE_CHANNEL_ID)
+    if channel:
+        if is_late:
+            await channel.send(
+                f"⏰ {user.mention} is **late today** (checked in at `{time_str}`)."
+            )
+        else:
+            await channel.send(
+                f"✅ {user.mention} is **on time today** (checked in at `{time_str}`)."
+            )
 
 
 # ----------------- COMMAND: /my_late_count -----------------
@@ -221,7 +244,7 @@ async def my_late_count(interaction: discord.Interaction, year: int, month: int)
 
     if is_excluded_user(user):
         await interaction.response.send_message(
-            "⚠️ You are exempt from attendance tracking.", ephemeral=True
+            "❌ You are excluded from the attendance system.", ephemeral=True
         )
         return
 
@@ -247,8 +270,13 @@ async def my_late_count(interaction: discord.Interaction, year: int, month: int)
 @bot.tree.command(name="monthly_report", description="Generate late fine report for a month (admins only).")
 @app_commands.describe(year="Year", month="Month from 1 to 12")
 async def monthly_report(interaction: discord.Interaction, year: int, month: int):
-    if not any(r.permissions.administrator for r in interaction.user.roles):
-        await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
+    if is_excluded_user(interaction.user):
+        await interaction.response.send_message("❌ You are excluded from the attendance system.", ephemeral=True)
+        return
+
+    # Only CEO/CTO/CFO/COO
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only attendance admins can run this.", ephemeral=True)
         return
 
     await interaction.response.defer(thinking=True)
@@ -265,8 +293,12 @@ async def monthly_report(interaction: discord.Interaction, year: int, month: int
 )
 @app_commands.describe(year="Year", month="Month from 1 to 12")
 async def attendance_report(interaction: discord.Interaction, year: int, month: int):
-    if not any(r.permissions.administrator for r in interaction.user.roles):
-        await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
+    if is_excluded_user(interaction.user):
+        await interaction.response.send_message("❌ You are excluded from the attendance system.", ephemeral=True)
+        return
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only attendance admins can run this.", ephemeral=True)
         return
 
     guild = interaction.guild
@@ -283,7 +315,7 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
     rows = c.fetchall()
     conn.close()
 
-    # Filter out excluded roles by user_id
+    # Filter out excluded roles by user_id (NoAttendance etc.)
     filtered_rows = []
     for user_id, username, d, t, is_late in rows:
         if is_excluded_user_id(guild, user_id):
@@ -322,8 +354,12 @@ async def attendance_report(interaction: discord.Interaction, year: int, month: 
     description="Show who is present and absent today (admins only)."
 )
 async def attendance_today(interaction: discord.Interaction):
-    if not any(r.permissions.administrator for r in interaction.user.roles):
-        await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
+    if is_excluded_user(interaction.user):
+        await interaction.response.send_message("❌ You are excluded from the attendance system.", ephemeral=True)
+        return
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only attendance admins can run this.", ephemeral=True)
         return
 
     guild = interaction.guild
@@ -373,8 +409,12 @@ async def attendance_today(interaction: discord.Interaction):
 )
 @app_commands.describe(year="Year", month="Month from 1 to 12")
 async def employee_summary(interaction: discord.Interaction, year: int, month: int):
-    if not any(r.permissions.administrator for r in interaction.user.roles):
-        await interaction.response.send_message("❌ Only admins can run this.", ephemeral=True)
+    if is_excluded_user(interaction.user):
+        await interaction.response.send_message("❌ You are excluded from the attendance system.", ephemeral=True)
+        return
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only attendance admins can run this.", ephemeral=True)
         return
 
     guild = interaction.guild
