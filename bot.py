@@ -27,7 +27,10 @@ EXCLUDED_FROM_ATTENDANCE = ["CEO", "CTO", "CFO", "COO", "NoAttendance"]
 # Roles that ARE attendance admins (can run report commands)
 ADMIN_ROLES = ["CEO", "CTO", "CFO", "COO"]
 
-DB_FILE = "attendance.db"
+# ---- DB: use Railway volume at /data ----
+DB_DIR = "/data"  # this is the mount path you set in Railway
+os.makedirs(DB_DIR, exist_ok=True)  # ensure directory exists
+DB_FILE = os.path.join(DB_DIR, "attendance.db")
 
 # Your local timezone (Pakistan)
 TIMEZONE = ZoneInfo("Asia/Karachi")
